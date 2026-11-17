@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: tradeexample
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: "jdbc:mysql://${TRADEEXAMPLE_DB_HOST:127.0.0.1}:${TRADEEXAMPLE_DB_PORT:3306}/tradeexample?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai"
+    username: ${TRADEEXAMPLE_DB_USERNAME}
+    password: ${TRADEEXAMPLE_DB_PASSWORD}
+
+  sql:
+    init:
+      mode: never
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    encoding: UTF-8
+    validate-migration-naming: true
+    clean-disabled: true
+
+server:
+  address: 127.0.0.1
+  port: 18080
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+
+  global-config:
+    db-config:
+      id-type: auto

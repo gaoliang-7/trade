@@ -2,6 +2,7 @@ package com.tradeexample.wms.controller;
 
 import com.tradeexample.common.api.ApiResponse;
 import com.tradeexample.wms.dto.CreateOutboundOrderRequest;
+import com.tradeexample.wms.dto.SubmitOutboundOrderRequest;
 import com.tradeexample.wms.service.OutboundOrderService;
 import com.tradeexample.wms.vo.OutboundOrderDetailVO;
 import jakarta.validation.Valid;
@@ -29,6 +30,16 @@ public class OutboundOrderController {
         return ApiResponse.success(
                 outboundOrderService.createDraft(request)
         );
+    }
+
+    @PostMapping("/{id}/submit")
+    public ApiResponse<OutboundOrderDetailVO> submit(
+            @PathVariable("id")
+            @Positive(message = "出库单ID必须大于0")
+            Long id,
+            @Valid @RequestBody SubmitOutboundOrderRequest request) {
+
+        return ApiResponse.success(outboundOrderService.submit(id, request));
     }
 
     @GetMapping("/{id}")

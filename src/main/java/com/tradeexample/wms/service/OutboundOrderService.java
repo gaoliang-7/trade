@@ -18,7 +18,10 @@ import org.springframework.transaction.annotation.Transactional;
 import com.tradeexample.wms.dto.SubmitOutboundOrderRequest;
 import com.tradeexample.wms.entity.InventoryMovement;
 import com.tradeexample.wms.mapper.InventoryMovementMapper;
+import com.tradeexample.wms.dto.CancelOutboundOrderRequest;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Comparator;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -92,20 +95,7 @@ public class OutboundOrderService {
     )
     public OutboundOrderDetailVO submit(Long id, SubmitOutboundOrderRequest request) {
 
-        OutboundOrder order = outboundOrderMapper.selectByIdForUpdate(id);
-        if (order == null) {
-            throw new BusinessException(
-                    ErrorCode.RESOURCE_NOT_FOUND,
-                    "出库单不存在"
-            );
-        }
-
-        if (!order.getRevision().equals(request.revision())) {
-            throw new BusinessException(
-                    ErrorCode.BUSINESS_CONFLICT,
-                    "出库单修订号不匹配，请刷新后确认"
-            );
-        }
+        OutboundOrder order = lockCurrentRevision(id, request.revision());
 
         if ("SUBMITTED".equals(order.getStatus())) {
             return loadDetail(id);
@@ -144,13 +134,55 @@ public class OutboundOrderService {
             );
         }
 
-        // 多张单按相同的库存ID顺序更新，减少互相等待造成的死锁。
-        List<OutboundOrderItem> itemsByInventoryId = detail.items().stream()
-                .sorted(Comparator.comparing(OutboundOrderItem::getInventoryDetailId))
-                .toList();
-
-        for (OutboundOrderItem item : itemsByInventoryId) {
+        for (OutboundOrderItem item : sortByInventoryId(detail.items())) {
             deductAndRecord(item);
+        }
+
+        return detail;
+    }
+
+    /** 作废当前修订。已提交的单据要把已扣的箱数退回原批次。 */
+    @Transactional(
+            isolation = Isolation.READ_COMMITTED,
+            rollbackFor = Exception.class
+    )
+    public OutboundOrderDetailVO cancel(Long id, CancelOutboundOrderRequest request) {
+
+        OutboundOrder order = lockCurrentRevision(id, request.revision());
+        String originalStatus = order.getStatus();
+
+        if ("CANCELED".equals(originalStatus)) {
+            return loadDetail(id);
+        }
+
+        boolean wasSubmitted = "SUBMITTED".equals(originalStatus);
+        if (!"DRAFT".equals(originalStatus) && !wasSubmitted) {
+            throw new BusinessException(
+                    ErrorCode.BUSINESS_CONFLICT,
+                    "当前状态不允许作废出库单"
+            );
+        }
+
+        if (!order.getVersion().equals(request.version())) {
+            throw new BusinessException(
+                    ErrorCode.BUSINESS_CONFLICT,
+                    "出库单版本已变化，请刷新后确认"
+            );
+        }
+
+        int updatedRows = outboundOrderMapper.markCanceled(
+                id, originalStatus, request.revision(), request.version()
+        );
+        if (updatedRows != 1) {
+            throw new BusinessException(
+                    ErrorCode.BUSINESS_CONFLICT,
+                    "出库单状态或版本已变化，请刷新后确认"
+            );
+        }
+
+        OutboundOrderDetailVO detail = loadDetail(id);
+        if (wasSubmitted) {
+            restoreCurrentRevision(detail);
         }
 
         return detail;
@@ -323,6 +355,114 @@ public class OutboundOrderService {
         movement.setAfterStockBoxCount(beforeStock - boxCount);
 
         if (inventoryMovementMapper.insert(movement) != 1) {
+            throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+        }
+    }
+
+    /** 锁住主表并核对修订号，避免旧请求操作新的分配方案。 */
+    private OutboundOrder lockCurrentRevision(Long id, Integer revision) {
+        OutboundOrder order = outboundOrderMapper.selectByIdForUpdate(id);
+        if (order == null) {
+            throw new BusinessException(
+                    ErrorCode.RESOURCE_NOT_FOUND,
+                    "出库单不存在"
+            );
+        }
+
+        if (!order.getRevision().equals(revision)) {
+            throw new BusinessException(
+                    ErrorCode.BUSINESS_CONFLICT,
+                    "出库单修订号不匹配，请刷新后确认"
+            );
+        }
+
+        return order;
+    }
+
+    /** 提交和作废按相同的库存ID顺序更新，减少交叉拿锁。 */
+    private List<OutboundOrderItem> sortByInventoryId(List<OutboundOrderItem> items) {
+        return items.stream()
+                .sorted(Comparator.comparing(OutboundOrderItem::getInventoryDetailId))
+                .toList();
+    }
+
+    /** 按当前修订的明细逐条核对原扣减流水，再恢复原批次。 */
+    private void restoreCurrentRevision(OutboundOrderDetailVO detail) {
+        OutboundOrder order = detail.order();
+        List<OutboundOrderItem> items = detail.items();
+
+        List<InventoryMovement> deductions = inventoryMovementMapper.selectList(
+                Wrappers.<InventoryMovement>lambdaQuery()
+                        .eq(InventoryMovement::getOutboundOrderId, order.getId())
+                        .eq(InventoryMovement::getRevision, order.getRevision())
+                        .eq(InventoryMovement::getMovementType, "DEDUCT")
+        );
+
+        if (items.isEmpty() || deductions.size() != items.size()) {
+            throw new BusinessException(
+                    ErrorCode.INTERNAL_ERROR,
+                    "当前修订的扣减流水与出库明细不匹配"
+            );
+        }
+
+        Map<Long, InventoryMovement> deductionByItemId = new HashMap<>();
+        for (InventoryMovement deduction : deductions) {
+            deductionByItemId.put(deduction.getOutboundOrderItemId(), deduction);
+        }
+
+        for (OutboundOrderItem item : sortByInventoryId(items)) {
+            InventoryMovement deduction = deductionByItemId.get(item.getId());
+            int boxCount = item.getOutboundBoxCount();
+
+            if (deduction == null
+                    || !item.getInventoryDetailId().equals(deduction.getInventoryDetailId())
+                    || deduction.getBoxCountChange() != -boxCount) {
+                throw new BusinessException(
+                        ErrorCode.INTERNAL_ERROR,
+                        "扣减流水与出库明细不一致，明细ID=" + item.getId()
+                );
+            }
+
+            restoreAndRecord(deduction);
+        }
+    }
+
+    /** 恢复一个原库存批次，记录实际余量并关联原扣减流水。 */
+    private void restoreAndRecord(InventoryMovement deduction) {
+        Long inventoryId = deduction.getInventoryDetailId();
+        InventoryDetail inventory = inventoryDetailMapper.selectById(inventoryId);
+        if (inventory == null) {
+            throw new BusinessException(
+                    ErrorCode.INTERNAL_ERROR,
+                    "原库存批次不存在"
+            );
+        }
+
+        int boxCount = -deduction.getBoxCountChange();
+        int beforeStock = inventory.getStockBoxCount();
+
+        int updatedRows = inventoryDetailMapper.restoreStock(
+                inventoryId, boxCount, inventory.getVersion()
+        );
+        if (updatedRows != 1) {
+            throw new BusinessException(
+                    ErrorCode.BUSINESS_CONFLICT,
+                    "库存批次 " + inventoryId + " 已变化或净出库箱数不足，无法恢复"
+            );
+        }
+
+        InventoryMovement restore = new InventoryMovement();
+        restore.setOutboundOrderId(deduction.getOutboundOrderId());
+        restore.setRevision(deduction.getRevision());
+        restore.setOutboundOrderItemId(deduction.getOutboundOrderItemId());
+        restore.setInventoryDetailId(inventoryId);
+        restore.setMovementType("RESTORE");
+        restore.setBoxCountChange(boxCount);
+        restore.setBeforeStockBoxCount(beforeStock);
+        restore.setAfterStockBoxCount(beforeStock + boxCount);
+        restore.setOriginalMovementId(deduction.getId());
+
+        if (inventoryMovementMapper.insert(restore) != 1) {
             throw new BusinessException(ErrorCode.INTERNAL_ERROR);
         }
     }

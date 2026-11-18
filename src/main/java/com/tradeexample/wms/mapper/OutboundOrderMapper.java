@@ -33,4 +33,21 @@ public interface OutboundOrderMapper extends BaseMapper<OutboundOrder> {
             @Param("revision") Integer revision,
             @Param("expectedVersion") Integer expectedVersion
     );
+
+    /** 只作废刚刚检查过的状态、修订和版本。 */
+    @Update("""
+            UPDATE wms_outbound_order
+            SET status = 'CANCELED',
+                version = version + 1
+            WHERE id = #{id}
+              AND status = #{expectedStatus}
+              AND revision = #{revision}
+              AND version = #{expectedVersion}
+            """)
+    int markCanceled(
+            @Param("id") Long id,
+            @Param("expectedStatus") String expectedStatus,
+            @Param("revision") Integer revision,
+            @Param("expectedVersion") Integer expectedVersion
+    );
 }

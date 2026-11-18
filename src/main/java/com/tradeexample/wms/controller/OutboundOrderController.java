@@ -1,6 +1,7 @@
 package com.tradeexample.wms.controller;
 
 import com.tradeexample.common.api.ApiResponse;
+import com.tradeexample.wms.dto.CancelOutboundOrderRequest;
 import com.tradeexample.wms.dto.CreateOutboundOrderRequest;
 import com.tradeexample.wms.dto.SubmitOutboundOrderRequest;
 import com.tradeexample.wms.service.OutboundOrderService;
@@ -40,6 +41,16 @@ public class OutboundOrderController {
             @Valid @RequestBody SubmitOutboundOrderRequest request) {
 
         return ApiResponse.success(outboundOrderService.submit(id, request));
+    }
+
+    @PostMapping("/{id}/cancel")
+    public ApiResponse<OutboundOrderDetailVO> cancel(
+            @PathVariable("id")
+            @Positive(message = "出库单ID必须大于0")
+            Long id,
+            @Valid @RequestBody CancelOutboundOrderRequest request) {
+
+        return ApiResponse.success(outboundOrderService.cancel(id, request));
     }
 
     @GetMapping("/{id}")

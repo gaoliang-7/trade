@@ -23,4 +23,20 @@ public interface InventoryDetailMapper extends BaseMapper<InventoryDetail> {
             @Param("boxCount") int boxCount,
             @Param("expectedVersion") Integer expectedVersion
     );
+
+    /** 版本匹配且净出库箱数足够时，把原扣减数量加回在仓库存。 */
+    @Update("""
+            UPDATE wms_inventory_detail
+            SET output_box_count = output_box_count - #{boxCount},
+                stock_box_count = stock_box_count + #{boxCount},
+                version = version + 1
+            WHERE id = #{id}
+              AND version = #{expectedVersion}
+              AND output_box_count >= #{boxCount}
+            """)
+    int restoreStock(
+            @Param("id") Long id,
+            @Param("boxCount") int boxCount,
+            @Param("expectedVersion") Integer expectedVersion
+    );
 }

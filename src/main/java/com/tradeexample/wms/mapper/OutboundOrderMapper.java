@@ -50,4 +50,24 @@ public interface OutboundOrderMapper extends BaseMapper<OutboundOrder> {
             @Param("revision") Integer revision,
             @Param("expectedVersion") Integer expectedVersion
     );
+
+    /** 原状态、修订和版本都匹配时，切到下一版草稿。 */
+    @Update("""
+            UPDATE wms_outbound_order
+            SET status = 'DRAFT',
+                revision = revision + 1,
+                version = version + 1,
+                total_box_count = #{totalBoxCount}
+            WHERE id = #{id}
+              AND status = #{expectedStatus}
+              AND revision = #{expectedRevision}
+              AND version = #{expectedVersion}
+            """)
+    int markRegenerated(
+            @Param("id") Long id,
+            @Param("expectedStatus") String expectedStatus,
+            @Param("expectedRevision") Integer expectedRevision,
+            @Param("expectedVersion") Integer expectedVersion,
+            @Param("totalBoxCount") long totalBoxCount
+    );
 }

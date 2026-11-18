@@ -19,6 +19,7 @@ import com.tradeexample.wms.dto.SubmitOutboundOrderRequest;
 import com.tradeexample.wms.entity.InventoryMovement;
 import com.tradeexample.wms.mapper.InventoryMovementMapper;
 import com.tradeexample.wms.dto.CancelOutboundOrderRequest;
+import com.tradeexample.wms.dto.RegenerateOutboundOrderRequest;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -186,6 +187,62 @@ public class OutboundOrderService {
         }
 
         return detail;
+    }
+
+    /** 按新需求生成下一版草稿。恢复旧库存和保存新明细在同一个事务里。 */
+    @Transactional(
+            isolation = Isolation.READ_COMMITTED,
+            rollbackFor = Exception.class
+    )
+    public OutboundOrderDetailVO regenerate(Long id, RegenerateOutboundOrderRequest request) {
+
+        OutboundOrder order = lockCurrentRevision(id, request.revision());
+        String originalStatus = order.getStatus();
+        boolean wasSubmitted = "SUBMITTED".equals(originalStatus);
+
+        if (!"DRAFT".equals(originalStatus)
+                && !wasSubmitted
+                && !"CANCELED".equals(originalStatus)) {
+            throw new BusinessException(
+                    ErrorCode.BUSINESS_CONFLICT,
+                    "当前状态不允许重新生成出库单"
+            );
+        }
+
+        if (!order.getVersion().equals(request.version())) {
+            throw new BusinessException(
+                    ErrorCode.BUSINESS_CONFLICT,
+                    "出库单版本已变化，请刷新后确认"
+            );
+        }
+
+        checkDuplicateDemands(request.demands());
+
+
+        // 先恢复旧修订扣掉的箱数，新分配才能用到这些库存。
+        if (wasSubmitted) {
+            restoreCurrentRevision(loadDetail(id));
+        }
+
+        List<OutboundOrderItem> newItems =
+                allocate(order.getWarehouseCode(), request.demands());
+        long totalBoxCount = sumBoxCounts(newItems);
+
+        int updatedRows = outboundOrderMapper.markRegenerated(
+                id, originalStatus, request.revision(), request.version(), totalBoxCount
+        );
+        if (updatedRows != 1) {
+            throw new BusinessException(
+                    ErrorCode.BUSINESS_CONFLICT,
+                    "出库单状态或版本已变化，请刷新后确认"
+            );
+        }
+
+        int nextRevision = order.getRevision() + 1;
+        insertRevisionItems(id, nextRevision, newItems);
+
+        return loadDetail(id);
+
     }
 
     /**
@@ -464,6 +521,28 @@ public class OutboundOrderService {
 
         if (inventoryMovementMapper.insert(restore) != 1) {
             throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+        }
+    }
+
+    private long sumBoxCounts(List<OutboundOrderItem> items) {
+        long total = 0L;
+        for (OutboundOrderItem item : items) {
+            total += item.getOutboundBoxCount().longValue();
+        }
+        return total;
+    }
+
+    /** 给新明细填上所属修订后追加保存，旧明细留作历史。 */
+    private void insertRevisionItems(
+            Long orderId, int revision, List<OutboundOrderItem> items) {
+
+        for (OutboundOrderItem item : items) {
+            item.setOutboundOrderId(orderId);
+            item.setRevision(revision);
+
+            if (outboundOrderItemMapper.insert(item) != 1) {
+                throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+            }
         }
     }
 

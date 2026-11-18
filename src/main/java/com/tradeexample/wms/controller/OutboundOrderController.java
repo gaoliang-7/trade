@@ -3,6 +3,7 @@ package com.tradeexample.wms.controller;
 import com.tradeexample.common.api.ApiResponse;
 import com.tradeexample.wms.dto.CancelOutboundOrderRequest;
 import com.tradeexample.wms.dto.CreateOutboundOrderRequest;
+import com.tradeexample.wms.dto.RegenerateOutboundOrderRequest;
 import com.tradeexample.wms.dto.SubmitOutboundOrderRequest;
 import com.tradeexample.wms.service.OutboundOrderService;
 import com.tradeexample.wms.vo.OutboundOrderDetailVO;
@@ -51,6 +52,16 @@ public class OutboundOrderController {
             @Valid @RequestBody CancelOutboundOrderRequest request) {
 
         return ApiResponse.success(outboundOrderService.cancel(id, request));
+    }
+
+    @PostMapping("/{id}/regenerate")
+    public ApiResponse<OutboundOrderDetailVO> regenerate(
+            @PathVariable("id")
+            @Positive(message = "出库单ID必须大于0")
+            Long id,
+            @Valid @RequestBody RegenerateOutboundOrderRequest request) {
+
+        return ApiResponse.success(outboundOrderService.regenerate(id, request));
     }
 
     @GetMapping("/{id}")

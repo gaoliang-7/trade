@@ -8,7 +8,10 @@ import org.springframework.context.annotation.Configuration;
 
 /** 注册仓储Mapper与乐观锁插件；业务事务和更新行数检查仍由Service负责。 */
 @Configuration
-@MapperScan("com.tradeexample.wms.mapper")
+@MapperScan({
+        "com.tradeexample.wms.mapper",
+        "com.tradeexample.imagesync.mapper"
+})
 public class MybatisPlusConfig {
 
     /**

@@ -30,3 +30,8 @@ mybatis-plus:
   global-config:
     db-config:
       id-type: auto
+
+tradeexample:
+  image-sync:
+    upload-url: "http://127.0.0.1:${server.port}/api/v1/mock/external-images"
+    delete-url: "http://127.0.0.1:${server.port}/api/v1/mock/external-images/{externalImageId}"

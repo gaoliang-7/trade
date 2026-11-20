@@ -8,6 +8,7 @@ import com.tradeexample.imagesync.mapper.ImageSyncMapper.ProductSnapshot;
 import com.tradeexample.imagesync.mapper.ImageSyncMapper.TaskInsert;
 import com.tradeexample.imagesync.mapper.ImageSyncMapper.TaskItemInsert;
 import com.tradeexample.imagesync.vo.ImageSyncResultVO;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -19,6 +20,7 @@ import org.springframework.web.client.RestClientResponseException;
 import java.util.Objects;
 
 /** 同步一条产品图片，在短事务之间调用外部图库。 */
+@Slf4j
 @Service
 public class ImageSyncService {
 
@@ -40,68 +42,85 @@ public class ImageSyncService {
         this.transactions.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
 
-    /** 保存本次尝试，同步图片，然后处理明细里已记录的待删除图片。 */
+    /** 同步指定产品的图片，返回这次的结果。 */
     public ImageSyncResultVO sync(long productId) {
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
-            throw new IllegalStateException("请在数据库事务提交后调用图片同步");
+            throw new IllegalStateException("请在事务外调用图片同步");
         }
 
-        Attempt attempt = transactions.execute(status -> createAttempt(productId));
-        String pendingDeleteId = uploadAndPublish(attempt);
-        if (pendingDeleteId != null) {
-            cleanup(attempt.itemId(), pendingDeleteId);
-        }
+        Attempt attempt = transactions.execute(tx -> {
+            ProductSnapshot source = requireProduct(productId);
+            TaskInsert task = new TaskInsert(source.productType(), "RUNNING");
+            requireOne(mapper.insertTask(task));
+
+            TaskItemInsert item = new TaskItemInsert(task.getId(), productId, source.imageVersion());
+            requireOne(mapper.insertItem(item));
+            return new Attempt(task.getId(), item.getId(), productId, source.imageVersion(), true);
+        });
+
+        syncAttempt(attempt);
         return mapper.selectResult(attempt.itemId());
     }
 
-    private Attempt createAttempt(long productId) {
-        ProductSnapshot source = requireProduct(productId);
+    /** 处理一条已保存的明细，出错就把原因记在这条明细上。 */
+    void syncBatchItem(ImageSyncResultVO item) {
+        try {
+            if (mapper.startItem(item.taskId(), item.itemId()) != 1) {
+                return;
+            }
 
-        TaskInsert task = new TaskInsert(source.productType());
-        requireOne(mapper.insertTask(task));
-
-        TaskItemInsert item = new TaskItemInsert(task.getId(), productId, source.imageVersion());
-        requireOne(mapper.insertItem(item));
-
-        return new Attempt(task.getId(), item.getId(), source);
+            Attempt attempt = new Attempt(
+                    item.taskId(), item.itemId(), item.productId(), item.imageVersion(), false);
+            syncAttempt(attempt);
+        } catch (RuntimeException exception) {
+            log.error("图片同步明细异常，itemId={}", item.itemId(), exception);
+            mapper.recordItemError(item.itemId(), "明细执行中断");
+        }
     }
 
-    /** 发出上传请求前重读源图版本和映射，过期或已同步时直接保存跳过结果。 */
-    private String uploadAndPublish(Attempt attempt) {
-        ProductSnapshot source = attempt.source();
-        ProductSnapshot beforeUpload = requireProduct(source.productId());
+    /** 上传前先核对源图版本，映射提交后再清理旧图。 */
+    private void syncAttempt(Attempt attempt) {
+        ProductSnapshot source = requireProduct(attempt.productId());
 
-        if (beforeUpload.imageVersion() != source.imageVersion()) {
-            return transactions.execute(tx ->
+        if (source.imageVersion() != attempt.imageVersion()) {
+            transactions.executeWithoutResult(tx ->
                     finish(attempt, ResultStatus.SKIPPED, null, SOURCE_CHANGED, null));
+            return;
         }
 
-        if (beforeUpload.hasCurrentMapping()) {
-            return transactions.execute(tx -> finish(
-                    attempt, ResultStatus.SKIPPED, beforeUpload.mappedExternalImageId(),
-                    ALREADY_SYNCED, null));
+        if (source.hasCurrentMapping()) {
+            transactions.executeWithoutResult(tx ->
+                    finish(attempt, ResultStatus.SKIPPED, source.mappedExternalImageId(),
+                            ALREADY_SYNCED, null));
+            return;
         }
 
-        String idempotencyKey = "tradeexample:image:" + source.productId() + ":v" + source.imageVersion();
+        String idempotencyKey =
+                "tradeexample:image:" + attempt.productId() + ":v" + attempt.imageVersion();
+
         String uploadedId;
         try {
             uploadedId = externalClient.upload(source.imageUrl(), idempotencyKey);
         } catch (RestClientException exception) {
             boolean rejected = exception instanceof RestClientResponseException responseException
                     && responseException.getStatusCode().is4xxClientError();
-            ResultStatus status = rejected ? ResultStatus.FAILED : ResultStatus.UNKNOWN;
-            String message = rejected ? "外部图库拒绝上传请求" : "未能确认外部图库的上传结果";
 
-            return transactions.execute(tx -> finish(attempt, status, null, message, null));
+            ResultStatus status = rejected ? ResultStatus.FAILED : ResultStatus.UNKNOWN;
+            String message = rejected ? "外部图库拒绝上传" : "上传结果未确认";
+            transactions.executeWithoutResult(tx -> finish(attempt, status, null, message, null));
+            return;
         }
 
-        return transactions.execute(tx -> publish(attempt, uploadedId));
+        String pendingDeleteId = transactions.execute(tx -> publish(attempt, uploadedId));
+        if (pendingDeleteId != null) {
+            cleanup(attempt.itemId(), pendingDeleteId);
+        }
     }
 
     /** 锁住产品后再核对版本，将映射和本次结果一起提交。 */
     private String publish(Attempt attempt, String uploadedId) {
-        long productId = attempt.source().productId();
-        long expectedVersion = attempt.source().imageVersion();
+        long productId = attempt.productId();
+        long expectedVersion = attempt.imageVersion();
 
         Long lockedVersion = mapper.lockImageVersion(productId);
         ProductSnapshot current = requireProduct(productId);
@@ -129,7 +148,7 @@ public class ImageSyncService {
         return finish(attempt, ResultStatus.SUCCESS, uploadedId, null, oldImageId);
     }
 
-    /** 一起结束明细和任务，返回提交后要删除的图片 ID。 */
+    /** 保存明细结果。单条同步在同一事务里结束自己的任务。 */
     private String finish(
             Attempt attempt,
             ResultStatus status,
@@ -140,9 +159,11 @@ public class ImageSyncService {
         requireOne(mapper.finishItem(
                 attempt.itemId(), status.name(), externalImageId, message, pendingDeleteId));
 
-        boolean completed = status == ResultStatus.SUCCESS || status == ResultStatus.SKIPPED;
-        requireOne(mapper.finishTask(
-                attempt.taskId(), completed ? "SUCCESS" : "FAILED", completed ? null : message));
+        if (attempt.standaloneTask()) {
+            boolean completed = status == ResultStatus.SUCCESS || status == ResultStatus.SKIPPED;
+            requireOne(mapper.finishTask(
+                    attempt.taskId(), completed ? "SUCCESS" : "FAILED", completed ? null : message));
+        }
 
         return pendingDeleteId;
     }
@@ -174,7 +195,13 @@ public class ImageSyncService {
         }
     }
 
-    private record Attempt(long taskId, long itemId, ProductSnapshot source) {
+    private record Attempt(
+            long taskId,
+            long itemId,
+            long productId,
+            long imageVersion,
+            boolean standaloneTask
+    ) {
     }
 
     private enum ResultStatus {

@@ -9,6 +9,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -60,6 +61,18 @@ public class MockExternalImageController {
         return ApiResponse.success(new UploadImageResponse(externalImageId));
     }
 
+    /** 根据原上传幂等键查询回执，回执在删除图片后仍可查询。 */
+    @GetMapping("/upload-receipts")
+    public synchronized ApiResponse<UploadImageResponse> findReceipt(
+            @RequestHeader("Idempotency-Key")
+            @Pattern(regexp = "\\S{1,128}", message = "幂等键必须为1到128个非空白字符")
+            String idempotencyKey) {
+
+        UploadReceipt receipt = uploadReceipts.get(idempotencyKey);
+        String externalImageId = receipt == null ? null : receipt.externalImageId();
+        return ApiResponse.success(new UploadImageResponse(externalImageId));
+    }
+
     /** 图片已经不存在也算删除成功。保留上传回执，防止旧请求重新建图。 */
     @DeleteMapping("/{externalImageId}")
     public synchronized ApiResponse<DeleteImageResponse> delete(
@@ -74,6 +87,7 @@ public class MockExternalImageController {
         return ApiResponse.success(new DeleteImageResponse(removed));
     }
 
+    /** 接收要同步的源图片地址。 */
     public record UploadImageRequest(
             @NotBlank(message = "图片地址不能为空")
             @Size(max = 1024, message = "图片地址不能超过1024个字符")
@@ -81,12 +95,15 @@ public class MockExternalImageController {
     ) {
     }
 
+    /** 模拟图库返回的上传回执，按键查询未命中时 ID 为空。 */
     public record UploadImageResponse(String externalImageId) {
     }
 
+    /** 记录这次删除前图片是否还存在。 */
     public record DeleteImageResponse(boolean removed) {
     }
 
+    /** 保存幂等键第一次上传的源图地址和外部 ID。 */
     private record UploadReceipt(String imageUrl, String externalImageId) {
     }
 }

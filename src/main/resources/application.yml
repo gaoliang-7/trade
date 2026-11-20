@@ -35,3 +35,8 @@ tradeexample:
   image-sync:
     upload-url: "http://127.0.0.1:${server.port}/api/v1/mock/external-images"
     delete-url: "http://127.0.0.1:${server.port}/api/v1/mock/external-images/{externalImageId}"
+    receipt-url: "http://127.0.0.1:${server.port}/api/v1/mock/external-images/upload-receipts"
+    connect-timeout-ms: 2000
+    read-timeout-ms: 5000
+    batch-wait-timeout-ms: 30000
+    task-timeout-ms: 180000
